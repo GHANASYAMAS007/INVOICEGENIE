@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import {
+  getInvoices,
+  saveInvoice,
+  deleteInvoice,
+  clearAllInvoices,
+} from "../lib/invoice.functions";
 
 export interface InvoiceItem {
   itemName: string;
@@ -11,64 +18,110 @@ export interface InvoiceRecord {
   date: string;
   vendorName: string;
   invoiceNumber: string;
-  items: InvoiceItem[];
+  items?: InvoiceItem[];
+  sourceImagePath?: string;
+  extractionStatus?: string;
   createdAt: number;
 }
-
-const STORAGE_KEY = "invoice-ocr-records";
 
 export function useInvoices() {
   const [records, setRecords] = useState<InvoiceRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState<"date" | "createdAt">("createdAt");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const getInvoicesFn = useServerFn(getInvoices);
+  const saveInvoiceFn = useServerFn(saveInvoice);
+  const deleteInvoiceFn = useServerFn(deleteInvoice);
+  const clearAllInvoicesFn = useServerFn(clearAllInvoices);
+
+  const fetchRecords = useCallback(async () => {
+    try {
+      const data = await getInvoicesFn({ data: { search, sortBy, sortOrder } });
+      setRecords(
+        data.map((r: any) => ({
+          id: r.id,
+          date: r.date,
+          vendorName: r.vendorName,
+          invoiceNumber: r.invoiceNumber,
+          items: [], // V1 DB does not store line items
+          sourceImagePath: r.sourceImagePath,
+          extractionStatus: r.extractionStatus,
+          createdAt: r.createdAt,
+        }))
+      );
+    } catch (e) {
+      console.error("Failed to load invoices from server database:", e);
+    } finally {
+      setLoaded(true);
+    }
+  }, [search, sortBy, sortOrder, getInvoicesFn]);
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as InvoiceRecord[];
-        setRecords(
-          parsed.map((r) => ({ ...r, items: Array.isArray(r.items) ? r.items : [] })),
-        );
-      }
-    } catch {
-      // ignore corrupt storage
-    }
-    setLoaded(true);
-  }, []);
-
-  const persist = useCallback((next: InvoiceRecord[]) => {
-    setRecords(next);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  }, []);
+    fetchRecords();
+  }, [fetchRecords]);
 
   const addRecord = useCallback(
-    (rec: Omit<InvoiceRecord, "id" | "createdAt">) => {
-      const record: InvoiceRecord = {
-        ...rec,
-        id: crypto.randomUUID(),
-        createdAt: Date.now(),
-      };
-      setRecords((prev) => {
-        const next = [record, ...prev];
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        return next;
-      });
+    async (rec: {
+      date: string;
+      vendorName: string;
+      invoiceNumber: string;
+      imageDataUrl: string;
+      extractionStatus: "processed" | "edited" | "manual_entry";
+    }) => {
+      setLoaded(false);
+      try {
+        await saveInvoiceFn({ data: rec });
+        await fetchRecords();
+      } catch (e) {
+        console.error("Failed to save invoice record:", e);
+        setLoaded(true);
+        throw e;
+      }
     },
-    [],
+    [saveInvoiceFn, fetchRecords]
   );
 
   const deleteRecord = useCallback(
-    (id: string) => {
-      setRecords((prev) => {
-        const next = prev.filter((r) => r.id !== id);
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        return next;
-      });
+    async (id: string) => {
+      setLoaded(false);
+      try {
+        await deleteInvoiceFn({ data: { id } });
+        await fetchRecords();
+      } catch (e) {
+        console.error("Failed to delete invoice record:", e);
+        setLoaded(true);
+        throw e;
+      }
     },
-    [],
+    [deleteInvoiceFn, fetchRecords]
   );
 
-  const clearAll = useCallback(() => persist([]), [persist]);
+  const clearAll = useCallback(async () => {
+    setLoaded(false);
+    try {
+      await clearAllInvoicesFn();
+      await fetchRecords();
+    } catch (e) {
+      console.error("Failed to clear all invoice records:", e);
+      setLoaded(true);
+      throw e;
+    }
+  }, [clearAllInvoicesFn, fetchRecords]);
 
-  return { records, loaded, addRecord, deleteRecord, clearAll };
+  return {
+    records,
+    loaded,
+    search,
+    setSearch,
+    sortBy,
+    setSortBy,
+    sortOrder,
+    setSortOrder,
+    addRecord,
+    deleteRecord,
+    clearAll,
+    refetch: fetchRecords,
+  };
 }
